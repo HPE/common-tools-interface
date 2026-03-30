@@ -216,6 +216,13 @@ arguments with these arguments.
 of \f[C]sacct\f[R] for finding MPMD job information.
 Use this if the Slurm database service is not available on your system.
 MPMD jobs are not supported with this option.
+.IP \[bu] 2
+\f[I]CTI_SLURM_DAEMON_GPUS_PER_NODE\f[R]: Slurm 25.11.1 / 26.05.0 fixed
+a bug fixed a bug where GPUs specified via \f[C]-G\f[R]
+(\f[C]SLURM_GPUS\f[R]) can cause GRES calculations to fail.
+(https://bugs.schedmd.com/show_bug.cgi?id=23832) CTI will use the total
+GPU count and node count to calculate GPUs per node.
+Set this environment variable to override this workaround.
 .SS SSH-specific variables
 .PP
 For workload managers that do not natively provide a file-shipping or

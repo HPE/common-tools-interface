@@ -171,6 +171,12 @@ supplied to start the attach process.
   finding MPMD job information. Use this if the Slurm database service is not
   available on your system. MPMD jobs are not supported with this option.
 
+- *CTI_SLURM_DAEMON_GPUS_PER_NODE*: Slurm 25.11.1 / 26.05.0 fixed a bug
+  fixed a bug where GPUs specified via `-G` (`SLURM_GPUS`) can cause GRES
+  calculations to fail. (https://bugs.schedmd.com/show_bug.cgi?id=23832)
+  CTI will use the total GPU count and node count to calculate GPUs per node.
+  Set this environment variable to override this workaround.
+
 ## SSH-specific variables
 
 For workload managers that do not natively provide a file-shipping or

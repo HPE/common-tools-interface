@@ -1869,16 +1869,74 @@ SLURMFrontend::SLURMFrontend()
             });
         }
 
+        auto version_less_than = [major, minor, patch]
+            (int want_major, int want_minor, int want_patch) {
+
+            auto less_than_major = (major < want_major);
+            auto less_than_major_minor = (major == want_major) && (minor < want_minor);
+            auto less_than_major_minor_patch = (major == want_major)
+                && (minor == want_minor) && (patch < want_patch);
+            return (less_than_major || less_than_major_minor || less_than_major_minor_patch);
+        };
+
         // CPE-10692 addressed a bug where jobs may silently fail when task prologs are
         // inacessible on node, or job otherwise exits during task prolog. In this case,
         // an exception is raised. In Slurm 25.05.2, the check for this state is no
         // longer reliable. From CPE-14234, change this check to only occur on 25.05.1 and
         // then to display a warning.
-        { auto less_than_25 = (major < 25);
-            auto less_than_25_05 = (major == 25) && (minor < 5);
-            auto less_than_25_05_02 = (major == 25) && (minor == 5) && (patch < 2);
-            if (less_than_25 || less_than_25_05 || less_than_25_05_02) {
-                m_checkTaskPrologStatus = true;
+        if (version_less_than(25, 5, 2)) {
+            m_checkTaskPrologStatus = true;
+        }
+
+        // Allow tool helpers to access task resources
+        if (!version_less_than(23, 11, 4)) {
+            m_srunDaemonArgs.insert(m_srunDaemonArgs.end(),
+                { "--gres-flags=allow-task-sharing"
+            });
+        }
+
+        // CPE-12956 / SchedMD 23832 fixed a bug where GPUs specified via
+        // -G (SLURM_GPUS) can cause GRES calculations to fail. If version is detected
+        // to be lower than 25.11.1 or 26.05, emit a warning and try to work around by
+        // setting --gpus-per-node
+        if (auto slurm_gpus_per_node = ::getenv(SLURM_DAEMON_GPUS_PER_NODE)) {
+            m_srunDaemonArgs.insert(m_srunDaemonArgs.end(),
+                { "--gpus-per-node=" + std::string{slurm_gpus_per_node}
+            });
+
+        // Check if workaround needed
+        } else if (auto slurm_gpus = ::getenv("SLURM_GPUS")) {
+            if (((major <= 25) && version_less_than(25, 11, 1))
+            || ((major == 26) && version_less_than(26,  5, 0))) {
+
+                fprintf(stderr, "Slurm versions before 25.11.1 / 26.05.0 "
+                    "are affected by Slurm bug 23832 where GPUs specified via "
+                    "-G (SLURM_GPUS) can cause GRES calculations to fail.\n");
+
+                // Calculate GPUs per node
+                if (auto slurm_nnodes = ::getenv("SLURM_NNODES")) {
+                    auto num_nodes = cti::stoi(slurm_nnodes, "SLURM_NNODES");
+                    if (num_nodes <= 0) {
+                        throw std::runtime_error("SLURM_NNODES was set to "
+                            + std::to_string(num_nodes) + ". Set "
+                            SLURM_DAEMON_GPUS_PER_NODE " to manually set "
+                            "--gpus-per-node for tool launches");
+                    }
+
+                    // GPUS per node = total GPUs / number of nodes, round up
+                    auto num_gpus = cti::stoi(slurm_gpus, "SLURM_GPUS");
+                    auto gpus_per_node = (num_gpus + (num_nodes - 1)) / num_nodes;
+
+                    fprintf(stderr, "Calculated %d GPUs across %d %s, setting "
+                        "--gpus-per-node=%d for tool launches.\nTo override this, "
+                        "set " SLURM_DAEMON_GPUS_PER_NODE "\n",
+                        num_gpus, num_nodes,
+                        (num_nodes == 1) ? "node" : "nodes", gpus_per_node);
+
+                    m_srunDaemonArgs.insert(m_srunDaemonArgs.end(),
+                        { "--gpus-per-node=" + std::to_string(gpus_per_node)
+                    });
+                }
             }
         }
 

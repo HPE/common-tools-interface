@@ -125,6 +125,8 @@ typedef struct
 #define SLURM_DISABLE_SACCT "CTI_SLURM_DISABLE_SACCT"
 // Cassini maximum job limit
 #define SLURM_CASSINI_JOB_LIMIT 3
+// CPE-12956 / SchedMD 23832 auto GPU calculation override
+#define SLURM_DAEMON_GPUS_PER_NODE "CTI_SLURM_DAEMON_GPUS_PER_NODE"
 
 /*******************************************************************************
 ** SSH specific information
