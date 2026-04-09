@@ -1,7 +1,7 @@
 [submodule "external/cdst_build_library"]
 	path = external/cdst_build_library
 	url = git@github.hpe.com:hpcde/cdst-cdst-build-library.git
-	branch = master
+	branch = gcc-12
 [submodule "rpmbuild/SOURCES/set_default"]
 	path = rpmbuild/SOURCES/set_default
 	url = git@github.hpe.com:hpcde/cdeux-set-default.git
