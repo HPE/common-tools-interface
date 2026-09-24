@@ -121,8 +121,8 @@ public:
         writeOpened = false;
     }
 
-    const int getReadFd() { return fds[ReadEnd]; }
-    const int getWriteFd() { return fds[WriteEnd]; }
+    int getReadFd() { return fds[ReadEnd]; }
+    int getWriteFd() { return fds[WriteEnd]; }
 
     /* Pipe - create and track closed ends of pipe */
     void pipe(int flags = 0)

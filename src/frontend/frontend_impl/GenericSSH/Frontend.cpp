@@ -470,7 +470,7 @@ GenericSSHFrontend::launchApp(const char * const launcher_argv[],
         auto const shimmedLauncherName = getShimmedLauncherName(launcher_path.get());
         if (!shimmedLauncherName.empty()) {
             // Get the shim setup paths from the frontend instance
-            auto const shimBinaryPath = Frontend::inst().getBaseDir() + "/libexec/" + CTI_MPIR_SHIM_BINARY;
+            auto const shimBinaryPath = Frontend::inst().getLibexecDir() + "/" + CTI_MPIR_SHIM_BINARY;
             auto const temporaryShimBinDir = Frontend::inst().getCfgDir() + "/shim";
             auto const shimmedLauncherPath = cti::take_pointer_ownership(_cti_pathFind(shimmedLauncherName.c_str(), nullptr), std::free);
             if (shimmedLauncherPath == nullptr) {

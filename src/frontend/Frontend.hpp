@@ -110,8 +110,11 @@ private: // Private data members usable only by the base Frontend
     FE_daemon           m_daemon;
     FE_prng             m_prng;
     // Directory paths
-    std::string         m_cfg_dir;
     std::string         m_base_dir;
+    std::string         m_cfg_dir;
+    std::string         m_lib_dir;
+    std::string         m_libexec_dir;
+    std::string         m_pals_dir;
     std::string         m_ld_audit_path;
     std::string         m_fe_daemon_path;
     std::string         m_be_daemon_path;
@@ -149,7 +152,7 @@ private: // Private utility methods used by the generic frontend
     // use username and pid info to build unique staging path; optionally create the staging direcotry
     std::string setupCfgDir();
     // find the base CTI directory from the environment and verify its permissions
-    std::string findBaseDir();
+    std::string findLibexecDir();
 
 public: // Public interface to generic WLM-agnostic capabilities
     // Write to the log file associated with the Frontend
@@ -176,6 +179,9 @@ public: // Public interface to generic WLM-agnostic capabilities
     std::string getGlobalLdPreload() { return m_ld_preload; }
     std::string getCfgDir() { return m_cfg_dir; }
     std::string getBaseDir() { return m_base_dir; }
+    std::string getLibexecDir() { return m_libexec_dir; }
+    std::string getLibDir() { return m_lib_dir; }
+    std::string getPalsDir() { return m_pals_dir; }
     std::string getLdAuditPath() { return m_ld_audit_path; }
     std::string getFEDaemonPath() { return m_fe_daemon_path; }
     std::string getBEDaemonPath() { return m_be_daemon_path; }
@@ -269,7 +275,7 @@ public: // impl.-specific interface that derived type must implement
     virtual void startDaemon(CArgArray argv, bool synchronous) = 0;
 
     // Return which file paths exist on all backends
-    virtual std::set<std::string> checkFilesExist(std::set<std::string> const& paths) {
+    virtual std::set<std::string> checkFilesExist(std::set<std::string> const& /*paths*/) {
         // WLMs that are capable of checking this will override and return which paths exist
         return {};
     }

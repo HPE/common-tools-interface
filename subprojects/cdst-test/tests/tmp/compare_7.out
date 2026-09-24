@@ -1,0 +1,9 @@
+Starting up
+Here we go
+Here we go
+Passed MPI_Init
+Passed MPI_Init
+Passed MPI_Init
+Passed MPI_Init
+scancel: error: Kill job error on job step id 5134453: Invalid job id specified
+slurmstepd: error: *** STEP 5134453.16 ON n019 CANCELLED AT 2023-02-07T12:03:42 ***

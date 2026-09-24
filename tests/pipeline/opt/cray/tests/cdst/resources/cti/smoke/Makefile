@@ -25,7 +25,13 @@ test_build: bindir
 
 # taken from the cti pkg-config
 PREBUILT_CFLAGS=-I$(CTI_INSTALL_DIR)/include
+
+ifdef CRAY_DYNINST_INSTALL_DIR
 PREBUILT_LIBS=-L$(CTI_INSTALL_DIR)/lib -Wl,--enable-new-dtags -Wl,-rpath,/opt/cray/pe/lib64 -Wl,-rpath,/opt/cray/pe/cti/default/lib -lcommontools_fe
+else
+PREBUILT_LIBS=-L$(CTI_INSTALL_DIR)/lib/cti -lcommontools_fe
+endif
+
 PREBUILT_FLAGS=$(PREBUILT_CFLAGS) $(PREBUILT_LIBS)
 
 prebuilt: prebuiltdir $(PREBUILT)

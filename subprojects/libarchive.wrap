@@ -1,0 +1,7 @@
+[wrap-git]
+directory = libarchive
+url = https://github.com/libarchive/libarchive.git
+revision = v3.4.0
+depth = 1
+patch_directory = libarchive
+

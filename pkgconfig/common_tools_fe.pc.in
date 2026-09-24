@@ -13,11 +13,11 @@ includedir=@includedir@
 
 # The system wide installation is linked in /opt/cray/pe/lib64, so programs built with the
 # system wide version should get their libraries from there.
-system_libdir=-L/opt/cray/pe/lib64 -Wl,--enable-new-dtags -Wl,-rpath,/opt/cray/pe/lib64 -Wl,-rpath,/opt/cray/pe/cti/default/lib
+cpe_libarg=-L/opt/cray/pe/lib64 -Wl,--enable-new-dtags -Wl,-rpath,/opt/cray/pe/lib64 -Wl,-rpath,/opt/cray/pe/cti/default/lib
 
 # When installed as a relocated rpm, there is no system wide behavior and the programs
 # get their libraries directly from the installation directory.
-relocated_libdir=-L${libdir}
+default_libarg=-L${libdir}
 
 Name: cti_fe
 URL: http://www.cray.com
@@ -25,5 +25,5 @@ Description: The frontend component of the common tools interface (CTI). Exposes
 Version: @VERSION@
 Requires:
 # libdir is replaced with either system_libdir or relocated_libdir at rpm install time.
-Libs: ${&libdir&} -lcommontools_fe
+Libs: ${default_libarg} -lcommontools_fe
 Cflags: -I${includedir}

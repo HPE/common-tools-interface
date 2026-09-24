@@ -35,13 +35,15 @@
 #include "useful/cti_wrappers.hpp"
 #include "useful/cti_split.hpp"
 #include "useful/cti_dlopen.hpp"
-#include "checksum/checksums.h"
+#include "checksums.h"
 
 // Static data objects
 std::atomic<Frontend*>              Frontend::m_instance{nullptr};
 std::mutex                          Frontend::m_mutex;
 std::unique_ptr<cti::Logger>        Frontend::m_logger;  // must be destroyed after m_cleanup
 std::unique_ptr<Frontend_cleanup>   Frontend::m_cleanup{nullptr};
+
+extern "C" std::string cti_findLibDir();
 
 // Set this library instance as original
 pid_t Frontend::m_original_pid{getpid()};
@@ -244,29 +246,43 @@ Frontend::setupCfgDir()
 }
 
 std::string
-Frontend::findBaseDir(void)
+Frontend::findLibexecDir(void)
 {
     // Check if env var is defined
     auto findUnverifiedBaseDir = []() {
         const char * base_dir_env = getenv(CTI_BASE_DIR_ENV_VAR);
         // Check default install locations
-        if (!cti::dirHasPerms(base_dir_env, R_OK | X_OK)) {
-            for (const char* const* pathPtr = cti::default_dir_locs; *pathPtr != nullptr; pathPtr++) {
-                if (cti::dirHasPerms(*pathPtr, R_OK | X_OK)) {
-                    return std::string{*pathPtr};
-                }
-            }
-        }
-        else {
+        if (base_dir_env && cti::dirHasPerms(base_dir_env, R_OK | X_OK)) {
             // Honor the env var setting
-            return std::string{base_dir_env};
+            return std::string{base_dir_env} + "/libexec";
+        }
+
+        // otherwise, look in the standard CPE locations
+        for (const char* const* pathPtr = cti::default_dir_locs; *pathPtr != nullptr; pathPtr++) {
+            if (cti::dirHasPerms(*pathPtr, R_OK | X_OK)) {
+                return std::string{*pathPtr};
+            }
         }
 
         throw std::runtime_error(std::string{"failed to find a CTI installation. Ensure "} + CTI_BASE_DIR_ENV_VAR + " is set properly.");
     };
 
-    auto verifyBaseDir = [](std::string const& unverifiedBaseDir) {
+    auto findUnverifiedLibexecDir = []() {
+        // The first approach works whether we are in a CPE install:
+        // /opt/cray/pe/cti/version/libexec  or an open source install
+        // [newcpe]/libexec/cti to match standard install patterns
+        // It just finds the lib location and assumes that lib and libexec are parallel.
+        auto libDir = cti_findLibDir();
+        auto libLoc = libDir.rfind("/lib");
+        if (libLoc != std::string::npos && (libLoc + 4 == libDir.size() || libDir[4] == '/')) {
+            libDir.replace(libLoc, 4, "/libexec");
+            return libDir;
+        } else {
+            return std::string{};
+        }
+    };
 
+    auto verifyLibexecDir = [](std::string const& unverifiedLibexecDir) {
         // Hash the file at the given path
         auto checkHash = [](std::string const& path, std::string const& hash) {
             if (!has_same_hash(path.c_str(), hash.c_str())) {
@@ -275,14 +291,18 @@ Frontend::findBaseDir(void)
         };
 
         // Checksum important binaries in the detected directory
-        checkHash(unverifiedBaseDir + "/libexec/" + CTI_BE_DAEMON_BINARY, CTI_BE_DAEMON_CHECKSUM);
+        checkHash(unverifiedLibexecDir + "/" + CTI_BE_DAEMON_BINARY, CTI_BE_DAEMON_CHECKSUM);
     };
 
     // Find and verify base dir
-    auto const baseDir = findUnverifiedBaseDir();
-    verifyBaseDir(baseDir);
+    auto libexecDir = findUnverifiedLibexecDir();
+    if (libexecDir.empty()) {
+        libexecDir = findUnverifiedBaseDir() + "/libexec";
+    }
+    
+    verifyLibexecDir(libexecDir);
 
-    return baseDir;
+    return libexecDir;
 }
 
 static auto
@@ -1375,11 +1395,19 @@ Frontend::Frontend()
     // Setup the directories. We break these out into private static methods
     // to avoid pollution in the constructor.
     m_cfg_dir = setupCfgDir();
-    m_base_dir = findBaseDir();
+    m_libexec_dir = findLibexecDir();
+    if (auto libExecLoc = m_libexec_dir.rfind("/libexec"); libExecLoc != std::string::npos) {
+        m_base_dir = m_libexec_dir.substr(0, libExecLoc);
+        m_lib_dir = m_base_dir + "/lib" + m_libexec_dir.substr(libExecLoc+8);
+        m_pals_dir = m_base_dir + "/pals";
+    } else {
+        throw std::runtime_error(std::string{"failed to find libexec directory in CTI installation"});
+    }
+
     // Following strings depend on m_base_dir
-    m_ld_audit_path = cti::accessiblePath(m_base_dir + "/lib/" + LD_AUDIT_LIB_NAME);
-    m_fe_daemon_path = cti::accessiblePath(m_base_dir + "/libexec/" + CTI_FE_DAEMON_BINARY);
-    m_be_daemon_path = cti::accessiblePath(m_base_dir + "/libexec/" + CTI_BE_DAEMON_BINARY);
+    m_ld_audit_path = cti::accessiblePath(m_lib_dir + "/" + LD_AUDIT_LIB_NAME);
+    m_fe_daemon_path = cti::accessiblePath(m_libexec_dir + "/" + CTI_FE_DAEMON_BINARY);
+    m_be_daemon_path = cti::accessiblePath(m_libexec_dir + "/" + CTI_BE_DAEMON_BINARY);
     // init the frontend daemon now that we have the path to the binary
     m_daemon.initialize(m_fe_daemon_path);
 }
@@ -1556,3 +1584,22 @@ App::finalize()
     }
     m_sessions.clear();
 }
+
+#include <dlfcn.h>
+extern "C" std::string cti_findLibDir()
+{
+    Dl_info info;
+
+    // find the location of the zmqnet frontend library
+    if (dladdr((void*)cti_findLibDir, &info) != 0) {
+        const auto fname = info.dli_fname;
+        if (auto loc = strrchr(fname, '/')) {
+            return std::string{fname, loc};
+        }
+    } else {
+        fprintf(stderr, "cti_findLibDir: dladdr failed: %s\n", dlerror());
+    }
+
+    return "";
+}
+

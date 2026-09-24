@@ -4,6 +4,7 @@
  * Copyright 2020-2025 Hewlett Packard Enterprise Development LP.
  * SPDX-License-Identifier: Linux-OpenIB
  *********************************************************************************/
+#define _GNU_SOURCE
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>

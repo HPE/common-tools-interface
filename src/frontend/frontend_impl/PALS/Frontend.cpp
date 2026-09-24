@@ -817,8 +817,8 @@ static inline auto fixLaunchArguments(std::string const& launcherName, CArgArray
 
 		// Get path to PALS preload library
 		try {
-			preloadPalsPath = cti::accessiblePath(Frontend::inst().getBaseDir()
-				+ "/lib/libctipreloadpals.so");
+			preloadPalsPath = cti::accessiblePath(Frontend::inst().getLibDir()
+				+ "/libctipreloadpals.so");
 		} catch (std::exception const& ex) {
 			Frontend::inst().writeLog("failed to get PALS preload library path: %s\n", ex.what());
 		}
@@ -947,7 +947,7 @@ PALSFrontend::getPMIxUtilPath()
     }
 
     // Check utility source
-    auto pmixSource = Frontend::inst().getBaseDir() + "/pals/" PALS_PMIX_SRC;
+    auto pmixSource = Frontend::inst().getPalsDir() + "/" PALS_PMIX_SRC;
     if (!cti::fileHasPerms(pmixSource.c_str(), R_OK)) {
         throw std::runtime_error("Could not find PMIx utility source at " + pmixSource);
     }

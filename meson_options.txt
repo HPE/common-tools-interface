@@ -1,0 +1,24 @@
+
+option(
+  'flux-dir',
+  type: 'string',
+  value: '',
+  description: 'path to the flux headers - flux support if skipped if this is not supplied',
+)
+
+option(
+  'pals-dir',
+  type: 'string',
+  value: '',
+  description: 'path to the pals headers - pals support is skipped if this is not supplied',
+)
+
+option(
+  'dyninst',
+  type: 'combo',
+  choices: ['auto', 'system', 'subproject'],
+  value: 'auto',
+  description: 'how to satisfy the dyninst dependency: auto-detect, force system-installed libraries, or build from source as a subproject',
+)
+
+  

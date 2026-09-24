@@ -817,7 +817,7 @@ static auto srunMPIR(FE_daemon& daemon, char const* launcher_path, char const* c
             auto slurmDirectory = std::filesystem::path{sattachPath}.parent_path();
             auto srunPath = std::string{slurmDirectory / "srun"};
 
-            auto const shimBinaryPath = Frontend::inst().getBaseDir() + "/libexec/" + CTI_MPIR_SHIM_BINARY;
+            auto const shimBinaryPath = Frontend::inst().getLibexecDir() + "/" + CTI_MPIR_SHIM_BINARY;
             auto const temporaryShimBinDir = Frontend::inst().getCfgDir() + "/shim";
 
             // If CTI_DEBUG is enabled, show wrapper output
@@ -1524,7 +1524,7 @@ MPIRProctable SLURMApp::reparentProctable(MPIRProctable const& procTable,
     auto result = MPIRProctable{procTable};
 
     // Ship reparenting utility
-    auto const sourcePath = m_frontend.getBaseDir() + "/libexec/" CTI_FIRST_SUBPROCESS_BINARY;
+    auto const sourcePath = m_frontend.getLibexecDir() + "/" CTI_FIRST_SUBPROCESS_BINARY;
     auto const destinationPath = m_toolPath + "/" CTI_FIRST_SUBPROCESS_BINARY;
     std::filesystem::copy_file(sourcePath, destinationPath,
         std::filesystem::copy_options::overwrite_existing);
@@ -2440,7 +2440,7 @@ SLURMFrontend::submitBatchScript(std::string const& scriptPath,
     auto jobEnvArg = std::stringstream{};
 
     // Add startup barrier environment setting
-    auto ctiSlurmStopBinary = Frontend::inst().getBaseDir() + "/libexec/"
+    auto ctiSlurmStopBinary = Frontend::inst().getLibexecDir() + "/"
         + CTI_SLURM_STOP_BINARY;
 
     // Inherit current environment and ensure CTI_INSTALL_DIR is avaliable to stop job

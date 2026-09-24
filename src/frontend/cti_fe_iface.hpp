@@ -85,7 +85,7 @@ private:
         bool old_action_valid;
         struct sigaction old_action;
 
-        static void sig_handler(int signo)
+        static void sig_handler(int /*signo*/)
         {
             // Ignore signal while still allowing waitpid to function
         }

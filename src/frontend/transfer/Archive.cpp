@@ -123,7 +123,7 @@ struct FdHandle {
     operator const void*() const { return (fd >= 0) ? this : nullptr; }
 };
 
-void Archive::addFile(const std::string& entryPath, const std::string& filePath) {
+void Archive::addFile(const std::string& /*entryPath*/, const std::string& filePath) {
     // copy data from file to archive
     if (auto fdHandle = FdHandle(filePath)) {
         while (true) {

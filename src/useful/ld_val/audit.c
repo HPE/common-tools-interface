@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: Linux-OpenIB
  ******************************************************************************/
 
+#define _GNU_SOURCE
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif /* HAVE_CONFIG_H */

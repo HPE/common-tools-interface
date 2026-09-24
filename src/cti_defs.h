@@ -19,10 +19,7 @@
 // config.h. Since that doesn't have good macro guards, and this file does, it
 // is important to include cti_defs.h in every source file. This ensures configure
 // macros get pulled in as well.
-#ifdef HAVE_CONFIG_H
 #include <config.h>
-#endif /* HAVE_CONFIG_H */
-
 #include <limits.h>
 #include <stdint.h>
 #include <sys/types.h>

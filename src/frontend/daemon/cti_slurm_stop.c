@@ -2,7 +2,7 @@
  * Copyright 2022 Hewlett Packard Enterprise Development LP.
  * SPDX-License-Identifier: Linux-OpenIB
  ******************************************************************************/
-
+#define _GNU_SOURCE
 #include "config.h"
 
 #include <stdlib.h>

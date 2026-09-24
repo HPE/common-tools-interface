@@ -4,8 +4,13 @@ CTI = ${CTI_INSTALL_DIR}
 
 TESTS = ../..
 
-CRAY_CTI_FE_LIBS = -L$(CTI)/lib -lcommontools_fe
+CTI_LIB_DIR = $(CTI)/lib/cti
+CRAY_CTI_FE_LIBS = -L$(CTI_LIB_DIR) -lcommontools_fe
 CRAY_CTI_BE_LIBS = -lcommontools_be
+
+ifdef CRAY_DYNINST_INSTALL_DIR
+CTI_LIB_DIR = $(CTI)/lib
+endif
 
 PTHREAD_FLAGS = -pthread
 
@@ -13,7 +18,7 @@ CC  := cc
 CXX := $(shell echo $(shell which CC || echo g++))
 
 CFLAGS := -Wall -g -O0 -I$(CTI)/include $(CFLAGS)
-LDFLAGS := -Wl,-rpath,$(CTI)/lib $(CRAY_CTI_FE_LIBS) $(LDFLAGS)
+LDFLAGS := -Wl,-rpath,$(CTI_LIB_DIR) $(CRAY_CTI_FE_LIBS) $(LDFLAGS)
 
 EXECS = cti_barrier cti_launch cti_launch_badenv cti_info cti_link cti_callback \
       cti_callback_daemon cti_kill cti_wlm cti_mpmd cti_file_transfer \
@@ -72,7 +77,7 @@ cti_callback : cti_callback_test.c
 
 cti_callback_daemon : cti_callback_daemon.c
 	$(CC) -Wall -g -O0 -I$(CTI)/include $^ -o $@ \
-      -Wl,-rpath,$(CTI)/lib -fPIC -L$(CTI)/lib $(CRAY_CTI_BE_LIBS)
+      -Wl,-rpath,$(CTI_LIB_DIR) -fPIC -L$(CTI_LIB_DIR) $(CRAY_CTI_BE_LIBS)
 
 cti_file_transfer : cti_file_transfer_test.cpp
 	$(CXX) $(CFLAGS) $^ -o $@ cti_fe_function_test.cpp $(LDFLAGS)

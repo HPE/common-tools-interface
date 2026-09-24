@@ -389,7 +389,7 @@ ALPSApp::kill(int signal)
             }
 
             // find signal tool
-            auto tool_path = m_frontend.getBaseDir() + "/libexec/cti_send_signal_backend";
+            auto tool_path = m_frontend.getLibexecDir() + "/cti_send_signal_backend";
 
             // add signal tool to session
             auto manif = session->createManifest().lock();

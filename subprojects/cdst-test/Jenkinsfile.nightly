@@ -1,0 +1,66 @@
+// run nightly functional tests
+
+pipeline {
+    options {
+        timeout(135) // in minutes, totalling 2 hours and 15 minutes
+    }
+    agent any
+
+    // parameters supplied by jenkins:
+    // - credentials: CREDS_UUID_DCLDAP: DCLDAP Username and Password. (username and password)
+    // - credentials: CREDS_UUID_NCN:    DCLDAP Username and Password for Shasta NCNs. (username and password)
+    // - credentials: CREDS_UUID_GIT:    SSH Username and Private Key for Github (ssh username and private key)
+    // - credentials: CREDS_UUID_SLACK:  Slack token (secret text)
+
+    // - string: GIT_CDST_TEST_DIRECTORY :Directory relative to the root of the git repo pointing to the cdst-test directory containing remote_test_tool.py. Start with a /.
+
+    //   test tool is invoked via:
+    //     ./remote_test_tool.py -u ${env.SSHUSER} ${params.ARGS_INSTALLS} ${params.ARGS_HOSTS}
+    // - string: ARGS_HOSTS:    Command line arguments to pass to remote_test_tool.py to select hosts.
+    //     e.g. "-o horizon -o kay -q shasta"
+    // - string: ARGS_INSTALLS: Command line arguments to pass to remote_test_tool.py to select remote tests and product installs.
+    //     e.g. "-b cray-cti:master" or "-t ../ -i cray-cti:master"
+
+    stages {
+        stage('Run Tests') {
+            steps {
+                script {
+                    env.ID = "${JOB_BASE_NAME}_${env.BUILD_NUMBER}".replaceAll(" ", "_")
+                }
+                dir("./${params.GIT_CDST_TEST_DIRECTORY}") {
+                    // assumed to put us in the same directory as remote_test_tool.py
+                    withEnv(['CDST_TESTS_LOG_NO_COLOR=1', 'CDST_TESTS_DEBUG=1']) {
+                        withCredentials([
+                            usernamePassword(credentialsId: "${params.CREDS_UUID_DCLDAP}",
+                            passwordVariable: 'SSHPASS', usernameVariable: 'SSHUSER'),
+                            usernamePassword(credentialsId: "${params.CREDS_UUID_NCN}",
+                            passwordVariable: 'CDST_TESTS_NCN_SSHPASS', usernameVariable: 'CDST_TESTS_NCN_USER')
+                        ]) {
+                            sh "rm -rf ./logs"
+                            sh "./remote_test_tool.py -u ${env.SSHUSER} ${params.ARGS_INSTALLS} ${params.ARGS_HOSTS} --clean-old --id ${env.ID}"
+                        }
+                    }
+                }
+            }
+        }
+        stage('Generate Artifacts') {
+            steps {
+                dir("./${params.GIT_CDST_TEST_DIRECTORY}") {
+                    archiveArtifacts artifacts: 'logs/**/*', followSymlinks: false
+                }
+            }
+        }
+        stage('Report Test Results') {
+            steps {
+                dir("./${params.GIT_CDST_TEST_DIRECTORY}") {
+                    script {
+                        def summary = junit 'logs/**/results.xml'
+                        slackmsg = sh(script: "./remote_test_tool.py --slack-msg", returnStdout: true).trim()
+                        slackSend tokenCredentialId: "${params.CREDS_UUID_SLACK}",
+                        message: "Functional test results for <${env.JOB_URL}/test_results_analyzer/|${JOB_BASE_NAME}> - <${env.RUN_DISPLAY_URL}|#${env.BUILD_NUMBER}>:\n${slackmsg}"
+                    }
+                }
+            }
+        }
+    }
+}
