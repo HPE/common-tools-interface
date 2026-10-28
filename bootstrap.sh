@@ -38,6 +38,11 @@ echo "#      Building CTI                        #"
 echo "############################################"
 # Create autotools generated files for this build environment
 
+flux_args=''
+if [ -f hpe/external/libalps_headers/pals.h ]; then
+    flux_args="-Dflux-dir=hpe/external/libalps_headers -Dpals-dir=hpe/external/libalps_headers"
+fi    
+
 # we explicitly set CC/CXX here to their full paths so that the full paths are
 # baked into the meson build configuration and meson doesn't use whatever gcc/g++ is
 # in PATH on subsequent builds outside of runBuild.sh
@@ -45,15 +50,12 @@ CC=$(which gcc) CXX=$(which g++) \
   meson setup \
     -Dprefix=$install_dir \
     -Dlibdir=lib/cti \
-    -Dflux-dir=hpe/external/libalps_headers \
-    -Dpals-dir=hpe/external/libalps_headers \
     -Ddebug=true \
     -Doptimization=2 \
     -Db_ndebug=true \
+    $flux_args \
     $reconfigure \
     ./build
-
-
 
 if [ -z "$reconfigure" ]; then
 
