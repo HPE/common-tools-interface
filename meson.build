@@ -103,20 +103,33 @@ if cray_dyninst_dep.found()
     dependencies: [ cray_dyninst_dep, symtabAPI_lib, pcontrol_lib ],
   )
 else
-  symtabAPI_lib = cxx.find_library(
-     'symtabAPI',
-     dirs: '/usr/lib64/dyninst',
-     required: true,
-  )
-  pcontrol_lib = cxx.find_library(
-     'pcontrol',
-     dirs: '/usr/lib64/dyninst',
-     required: true
-  )
+  # Prefer a Dyninst found via CMAKE_PREFIX_PATH (e.g. Spack) so headers and
+  # libraries come from the same installation
+  dyninst_dep = dependency('Dyninst', method: 'cmake',
+    modules: ['Dyninst::symtabAPI', 'Dyninst::pcontrol'], required: false)
+  if not dyninst_dep.found()
+    symtabAPI_lib = cxx.find_library(
+       'symtabAPI',
+       dirs: '/usr/lib64/dyninst',
+       required: true,
+    )
+    pcontrol_lib = cxx.find_library(
+       'pcontrol',
+       dirs: '/usr/lib64/dyninst',
+       required: true
+    )
 
+    dyninst_dep = declare_dependency(
+      include_directories: ['/usr/include/dyninst'],
+      dependencies: [ symtabAPI_lib, pcontrol_lib ],
+    )
+  endif
+endif
+
+if cxx.has_header('tbb/version.h', dependencies: dyninst_dep)
   dyninst_dep = declare_dependency(
-    include_directories: ['/usr/include/dyninst'],
-    dependencies: [ symtabAPI_lib, pcontrol_lib ],
+    dependencies: dyninst_dep,
+    compile_args: ['-DDYNINST_TBB_HAS_VERSION_H'],
   )
 endif
 
@@ -381,9 +394,13 @@ common_tools_be_pc = configure_file(input: 'pkgconfig/common_tools_be.pc.in', ou
 install_data(common_tools_fe_pc, install_dir: libdir / 'pkgconfig')
 install_data(common_tools_be_pc, install_dir: libdir / 'pkgconfig')
 
-googletest_subproject = cmake.subproject('googletest')
-gmock_dep = googletest_subproject.dependency('gmock')
-gtest_dep = googletest_subproject.dependency('gtest')
+gmock_dep = dependency('gmock', method: 'pkg-config', main: false, required: false)
+gtest_dep = dependency('gtest', method: 'pkg-config', main: false, required: false)
+if not gmock_dep.found() or not gtest_dep.found()
+  googletest_subproject = cmake.subproject('googletest')
+  gmock_dep = googletest_subproject.dependency('gmock')
+  gtest_dep = googletest_subproject.dependency('gtest')
+endif
 googletest_dep = declare_dependency(dependencies: [gmock_dep, gtest_dep])
 
 libmock_a = static_library(
