@@ -709,6 +709,174 @@ scontrol_get_config(std::string const& key)
     return result;
 }
 
+// GPUs allocated to a job, for the default tool daemon GPU request. Empty if the user set
+// the daemon GPU request or the query failed
+static SLURMFrontend::detail::JobGpus
+query_job_gpus(uint32_t job_id)
+{
+    if (::getenv(SLURM_DAEMON_GRES_ENV_VAR) || ::getenv(SLURM_DAEMON_GPUS_PER_NODE)) {
+        return {};
+    }
+
+    auto const jobIdStr = std::to_string(job_id);
+    char const* scontrol_argv[] = {"scontrol", "show", "job", "-d", jobIdStr.c_str(), nullptr};
+
+    try {
+        auto scontrolOutput = cti::Execvp{"scontrol", (char* const*)scontrol_argv,
+            cti::Execvp::stderr::Ignore};
+        auto& scontrolStream = scontrolOutput.stream();
+        auto result = SLURMFrontend::detail::parse_job_gpus(scontrolStream);
+
+        scontrolStream.ignore(std::numeric_limits<std::streamsize>::max());
+        if (auto const scontrol_rc = scontrolOutput.getExitStatus()) {
+            Frontend::inst().writeLog("scontrol show job -d %u failed with code %d\n",
+                job_id, scontrol_rc);
+            return {};
+        }
+
+        for (auto&& [nodes, gpus] : result.nodeGpus) {
+            Frontend::inst().writeLog("Job %u has %d GPUs on each of %s\n",
+                job_id, gpus, nodes.c_str());
+        }
+        if (result.hetJob) {
+            Frontend::inst().writeLog("Job %u is a heterogeneous job\n", job_id);
+        }
+        return result;
+
+    } catch (std::exception const& ex) {
+        Frontend::inst().writeLog("scontrol show job -d %u failed: %s\n", job_id, ex.what());
+        return {};
+    }
+}
+
+// Map each Slurm node name of a job to its GPU count. Only queried when the job's node
+// groups have different GPU counts; empty otherwise or on failure
+static std::map<std::string, int>
+expand_node_gpus(std::vector<SLURMFrontend::detail::NodeGpus> const& jobNodeGpus)
+{
+    auto counts = std::set<int>{};
+    for (auto&& group : jobNodeGpus) {
+        counts.insert(group.gpus);
+    }
+    if (counts.size() < 2) {
+        return {};
+    }
+
+    auto result = std::map<std::string, int>{};
+    for (auto&& [nodes, gpus] : jobNodeGpus) {
+        char const* scontrol_argv[] = {"scontrol", "show", "hostnames", nodes.c_str(), nullptr};
+        try {
+            auto scontrolOutput = cti::Execvp{"scontrol", (char* const*)scontrol_argv,
+                cti::Execvp::stderr::Ignore};
+            auto& scontrolStream = scontrolOutput.stream();
+            auto hostname = std::string{};
+            while (std::getline(scontrolStream, hostname)) {
+                if (!hostname.empty()) {
+                    result[hostname] = gpus;
+                }
+            }
+            if (auto const scontrol_rc = scontrolOutput.getExitStatus()) {
+                Frontend::inst().writeLog("scontrol show hostnames %s failed with code %d\n",
+                    nodes.c_str(), scontrol_rc);
+                return {};
+            }
+        } catch (std::exception const& ex) {
+            Frontend::inst().writeLog("scontrol show hostnames %s failed: %s\n",
+                nodes.c_str(), ex.what());
+            return {};
+        }
+    }
+
+    return result;
+}
+
+// Application node names per GPU count when the job's nodes have different GPU counts.
+// Empty if all job nodes have the same count or an application node has no known count
+static SLURMFrontend::detail::GpuNodeGroups
+get_app_gpu_groups(SLURMFrontend::detail::JobGpus const& jobGpus,
+    std::map<std::string, SLURMFrontend::StepLayout> const& stepLayout)
+{
+    auto const nodeGpuCounts = expand_node_gpus(jobGpus.nodeGpus);
+    if (nodeGpuCounts.empty()) {
+        return {};
+    }
+
+    auto appNodes = std::vector<std::string>{};
+    for (auto&& [id, layout] : stepLayout) {
+        for (auto&& node : layout.nodes) {
+            appNodes.push_back(node.hostname);
+        }
+    }
+
+    auto result = SLURMFrontend::detail::get_gpu_node_groups(appNodes, nodeGpuCounts);
+    if (result.empty()) {
+        Frontend::inst().writeLog("No GPU count for some application nodes, "
+            "using the GPU counts of all job nodes\n");
+    }
+    for (auto&& [gpus, hosts] : result) {
+        Frontend::inst().writeLog("Application uses %zu node(s) with %d GPUs\n",
+            hosts.size(), gpus);
+    }
+    return result;
+}
+
+// GPUs per node group to size the tool daemon request for: the application's nodes when
+// known, else all job nodes
+static std::vector<SLURMFrontend::detail::NodeGpus>
+get_request_node_gpus(SLURMFrontend::detail::JobGpus const& jobGpus,
+    SLURMFrontend::detail::GpuNodeGroups const& appGpuGroups)
+{
+    if (appGpuGroups.empty()) {
+        return jobGpus.nodeGpus;
+    }
+
+    auto result = std::vector<SLURMFrontend::detail::NodeGpus>{};
+    for (auto&& [gpus, hosts] : appGpuGroups) {
+        auto nodes = std::string{};
+        for (auto&& host : hosts) {
+            nodes += (nodes.empty() ? "" : ",") + host;
+        }
+        result.push_back({std::move(nodes), gpus});
+    }
+    return result;
+}
+
+// Default --gres value for a job's tool daemon steps. Launches may replace it with the
+// launcher's own GPU GRES (see SLURMFrontend::detail::get_gres_setting)
+static std::string
+get_daemon_gres(std::vector<SLURMFrontend::detail::NodeGpus> const& requestNodeGpus)
+{
+    // Slurm bug https://bugs.schedmd.com/show_bug.cgi?id=12642 breaks gres=none setting
+    // Allow user to specify or clear this argument via environment variable
+    if (auto const slurm_gres = ::getenv(SLURM_DAEMON_GRES_ENV_VAR)) {
+        return slurm_gres;
+    }
+
+    // CTI_SLURM_DAEMON_GPUS_PER_NODE already adds --gpus-per-node to the daemon arguments;
+    // don't add a second GPU request
+    if (::getenv(SLURM_DAEMON_GPUS_PER_NODE)) {
+        return {};
+    }
+
+    // A tool step with no GPU request asks for the job's total GPU count (from SLURM_GPUS or
+    // the job default). Slurm splits a total across an --overlap step by giving each node
+    // except the last one GPU and asking the last node for the rest, so on multi-node jobs
+    // the step fails with "Insufficient GRES" or starts with fewer GPUs than the job has
+    // (SchedMD 23832). Requesting the job's GPUs per node avoids this and lets tools see
+    // the job's GPUs.
+    auto result = SLURMFrontend::detail::get_allocation_gres(requestNodeGpus);
+    Frontend::inst().writeLog("Tool daemon GRES from job allocation: '%s'\n", result.c_str());
+    return result;
+}
+
+// Whether CTI_SLURM_DAEMON_GRES_SPLIT enables per-GPU-count daemon step components
+static bool
+daemon_gres_split_enabled()
+{
+    auto const split = ::getenv(SLURM_DAEMON_GRES_SPLIT);
+    return (split != nullptr) && (split[0] != '\0') && (split[0] != '0');
+}
+
 static auto
 find_jobs_on_nodes(std::set<std::string> const& nodes)
 {
@@ -984,7 +1152,12 @@ SLURMApp::SLURMApp(SLURMFrontend& fe, FE_daemon::MPIRResult&& mpirData, std::str
     , m_allJobIds       { get_all_job_ids(m_jobId, m_stepId) }
     , m_stepLayout      { fe.fetchStepLayout(m_allJobIds) }
     , m_beDaemonSent    { false }
-    , m_gresSetting {}
+    , m_jobGpus         { query_job_gpus(m_jobId) }
+    , m_appGpuGroups    { get_app_gpu_groups(m_jobGpus, m_stepLayout) }
+    , m_requestNodeGpus { get_request_node_gpus(m_jobGpus, m_appGpuGroups) }
+    , m_gresSetting     { get_daemon_gres(m_requestNodeGpus) }
+    , m_gresFromAllocation { !m_requestNodeGpus.empty() && !m_gresSetting.empty() }
+    , m_gresWarned      { false }
 
     , m_toolPath    { fe.findToolPath(std::to_string(m_jobId)) }
     , m_attribsPath { cti::cstr::asprintf(SLURM_CRAY_DIR, SLURM_APID(m_jobId, m_stepId)) }
@@ -1248,6 +1421,100 @@ environment variable " CTI_BASE_DIR_ENV_VAR " to the CTI install location.");
     m_beDaemonSent = true;
 }
 
+bool SLURMApp::canSplitDaemonGres() const
+{
+    // Heterogeneous steps are not allowed inside heterogeneous jobs, and only CTI's own
+    // allocation-based request is split; launcher or user GRES apply as given
+    return (m_appGpuGroups.size() >= 2) && !m_jobGpus.hetJob && (m_stepLayout.size() == 1)
+        && m_gresFromAllocation;
+}
+
+SLURMFrontend::detail::GpuNodeGroups const& SLURMApp::daemonGpuGroups()
+{
+    if (m_daemonGpuGroups) {
+        return *m_daemonGpuGroups;
+    }
+    m_daemonGpuGroups.emplace();
+
+    if (!daemon_gres_split_enabled() || (m_appGpuGroups.size() < 2)) {
+        return *m_daemonGpuGroups;
+    }
+
+    if (!canSplitDaemonGres()) {
+        writeLog(SLURM_DAEMON_GRES_SPLIT ": not splitting daemon step (heterogeneous job: %d, "
+            "GRES '%s' set by launcher or user: %d)\n",
+            (m_jobGpus.hetJob || (m_stepLayout.size() != 1)), m_gresSetting.c_str(),
+            !m_gresFromAllocation);
+        return *m_daemonGpuGroups;
+    }
+
+    *m_daemonGpuGroups = m_appGpuGroups;
+    for (auto&& [gpus, hosts] : *m_daemonGpuGroups) {
+        writeLog(SLURM_DAEMON_GRES_SPLIT ": %zu node(s) with %d GPUs\n", hosts.size(), gpus);
+    }
+    return *m_daemonGpuGroups;
+}
+
+cti::ManagedArgv SLURMApp::daemonLauncherEnv() const
+{
+    auto result = cti::ManagedArgv{};
+    for (auto&& envVar : dynamic_cast<SLURMFrontend&>(m_frontend).getSrunEnvBlacklist()) {
+        result.add("CTIBLACKLIST_" + envVar + "=");
+    }
+
+    // An inherited -G total (SLURM_GPUS) is added to every step component and conflicts
+    // with CTI's per-node --gres when daemons run on fewer nodes than the job or in
+    // separate per-GPU-count components
+    if (!m_gresSetting.empty()) {
+        result.add("CTIBLACKLIST_SLURM_GPUS=");
+    }
+
+    return result;
+}
+
+void SLURMApp::warnLimitedGpus()
+{
+    if (m_gresWarned) {
+        return;
+    }
+    m_gresWarned = true;
+
+    // Per-GPU-count components give every node all of its GPUs
+    if (!daemonGpuGroups().empty()) {
+        return;
+    }
+
+    auto const limitedNodes = SLURMFrontend::detail::get_limited_nodes(m_requestNodeGpus,
+        m_gresSetting);
+    if (limitedNodes.empty()) {
+        return;
+    }
+
+    auto nodeList = std::string{};
+    for (auto&& [nodes, gpus] : limitedNodes) {
+        nodeList += (nodeList.empty() ? "" : ", ") + nodes
+            + " (" + std::to_string(gpus) + " GPUs)";
+    }
+
+    // A single srun applies the same --gres to every node, so nodes with more GPUs than
+    // the per-node request only expose some of their GPUs to tool daemons
+    auto const sameCount = "allocate the same number of GPUs on every node (for example "
+        "with --gpus-per-node)";
+    auto const remedy = daemon_gres_split_enabled()
+        ? cti::cstr::asprintf(SLURM_DAEMON_GRES_SPLIT " is set but could not be used for "
+            "this job (see the CTI debug log). To avoid this, %s.", sameCount)
+        : canSplitDaemonGres()
+            ? cti::cstr::asprintf("To avoid this, set " SLURM_DAEMON_GRES_SPLIT "=1 to "
+                "request each node's GPUs separately, or %s.", sameCount)
+            : cti::cstr::asprintf("To avoid this, %s.", sameCount);
+    auto const warning = cti::cstr::asprintf("warning: tool daemons for Slurm job %u "
+        "request --gres=%s on every node, fewer GPUs than the job has on %s. Tools may not "
+        "be able to debug GPU code on those nodes. %s\n",
+        m_jobId, m_gresSetting.c_str(), nodeList.c_str(), remedy.c_str());
+    fputs(warning.c_str(), stderr);
+    writeLog("%s", warning.c_str());
+}
+
 cti::ManagedArgv SLURMApp::generateDaemonLauncherArgv(char const* const* launcher_args)
 {
     auto result = cti::ManagedArgv{};
@@ -1273,6 +1540,47 @@ cti::ManagedArgv SLURMApp::generateDaemonLauncherArgv(char const* const* launche
     // --cpu_bind=no --share --ntasks-per-node=1 --nodes=<numNodes>
     // --nodelist=<host1,host2,...> --disable-status --quiet --mpi=none
     // --input=none --output=none --error=none <tool daemon> <args>
+
+    // Warn once if the per-node GPU request hides some of the job's GPUs
+    warnLimitedGpus();
+
+    // With CTI_SLURM_DAEMON_GRES_SPLIT, nodes with different GPU counts get one
+    // heterogeneous step component per count
+    auto const& gpuGroups = daemonGpuGroups();
+    if (!gpuGroups.empty()) {
+        auto const& leaderId = m_stepLayout.begin()->first;
+        auto first = true;
+        for (auto&& [gpus, hostnames] : gpuGroups) {
+            if (first) {
+                first = false;
+            } else {
+                result.add(":");
+            }
+
+            result.add("--jobid=" + leaderId);
+            result.add("--nodes=" + std::to_string(hostnames.size()));
+            result.add((gpus > 0) ? "--gres=gpu:" + std::to_string(gpus) : "--gres=none");
+
+            for (auto&& arg : slurmFrontend.getSrunDaemonArgs()) {
+                result.add(arg);
+            }
+            if (auto slurm_daemon_args = getenv(SLURM_DAEMON_ARGS_ENV_VAR)) {
+                SLURMFrontend::detail::add_quoted_args(result, slurm_daemon_args);
+            }
+
+            auto hostlist = std::string{};
+            for (auto&& hostname : hostnames) {
+                hostlist += (hostlist.empty() ? "" : ",") + hostname;
+            }
+            result.add("--nodelist=" + hostlist);
+
+            for (auto arg = launcher_args; *arg != nullptr; arg++) {
+                result.add(*arg);
+            }
+        }
+
+        return result;
+    }
 
     auto first = true;
     auto leaderId = std::string{};
@@ -1457,6 +1765,10 @@ MPIRProctable SLURMApp::reparentProctable(MPIRProctable const& procTable,
             launcherArgv.add("--jobid=" + id);
             launcherArgv.add("--nodes=" + std::to_string(layout.nodes.size()));
             launcherArgv.add("--nodelist=" + hostname);
+            // Same GPU request as tool daemons, so inherited GPU totals don't reject this step
+            if (!m_gresSetting.empty()) {
+                launcherArgv.add("--gres=" + m_gresSetting);
+            }
 
             // Add daemon launch arguments, except for output redirection
             for (auto&& arg : slurmFrontend.getSrunDaemonArgs()) {
@@ -1473,10 +1785,7 @@ MPIRProctable SLURMApp::reparentProctable(MPIRProctable const& procTable,
         }
 
         // Build environment from blacklist
-        cti::ManagedArgv launcherEnv;
-        for (auto&& envVar : slurmFrontend.getSrunEnvBlacklist()) {
-            launcherEnv.add("CTIBLACKLIST_" + envVar + "=");
-        }
+        auto launcherEnv = daemonLauncherEnv();
 
         // Capture lines of output from srun
         auto outputPipe = cti::Pipe{};
@@ -1608,10 +1917,7 @@ void SLURMApp::startDaemon(const char* const args[], bool synchronous)
 
     // build environment from blacklist
     auto& slurmFrontend = dynamic_cast<SLURMFrontend&>(m_frontend);
-    auto launcherEnv = cti::ManagedArgv{};
-    for (auto&& envVar : slurmFrontend.getSrunEnvBlacklist()) {
-        launcherEnv.add("CTIBLACKLIST_" + envVar + "=");
-    }
+    auto launcherEnv = daemonLauncherEnv();
 
     // Find the path to the launcher
     auto launcherPath = cti::findPath(slurmFrontend.getLauncherName());
@@ -1693,10 +1999,7 @@ SLURMApp::checkFilesExist(std::set<std::string> const& paths)
     auto launcherArgv = generateDaemonLauncherArgv(launcherArgs.get());
 
     // Build environment from blacklist
-    cti::ManagedArgv launcherEnv;
-    for (auto&& envVar : dynamic_cast<SLURMFrontend&>(m_frontend).getSrunEnvBlacklist()) {
-        launcherEnv.add("CTIBLACKLIST_" + envVar + "=");
-    }
+    auto launcherEnv = daemonLauncherEnv();
 
     auto stdoutPipe = cti::Pipe{};
 
@@ -1778,12 +2081,20 @@ static auto getSlurmVersion()
     }
 }
 
-std::string SLURMFrontend::detail::get_gres_setting(char const* const* launcher_argv)
+SLURMFrontend::detail::GresSetting
+SLURMFrontend::detail::get_gres_setting(char const* const* launcher_argv,
+    std::string const& allocationGres)
 {
     // Slurm bug https://bugs.schedmd.com/show_bug.cgi?id=12642 breaks gres=none setting
     // Allow user to specify or clear this argument via environment variable
     if (auto const slurm_gres = ::getenv(SLURM_DAEMON_GRES_ENV_VAR)) {
-        return slurm_gres;
+        return {slurm_gres, false};
+    }
+
+    // CTI_SLURM_DAEMON_GPUS_PER_NODE already adds --gpus-per-node to the daemon arguments;
+    // an added --gres=none would take the GPUs away again
+    if (::getenv(SLURM_DAEMON_GPUS_PER_NODE)) {
+        return {{}, false};
     }
 
     // Inherit GPU GRES setting if provided
@@ -1817,7 +2128,7 @@ std::string SLURMFrontend::detail::get_gres_setting(char const* const* launcher_
 
                 // Search for GPU GRES setting
                 if (head.rfind("gpu:", 0) == 0) {
-                    return head;
+                    return {head, false};
                 }
 
                 // Try next part of GRES
@@ -1826,8 +2137,125 @@ std::string SLURMFrontend::detail::get_gres_setting(char const* const* launcher_
         }
     }
 
-    // If GRES argument is not specified, use gres=none
-    return "none";
+    // Otherwise use the job's per-node GPUs, or gres=none if the job has none
+    if (allocationGres.empty()) {
+        return {"none", false};
+    }
+    return {allocationGres, true};
+}
+
+SLURMFrontend::detail::JobGpus
+SLURMFrontend::detail::parse_job_gpus(std::istream& scontrolJobDetail)
+{
+    auto result = JobGpus{};
+
+    // Detailed job output has one line per group of nodes with identical allocations:
+    //   Nodes=nid[001-002] CPU_IDs=0-63 Mem=0 GRES=gpu:a100:4(IDX:0-3)
+    // Heterogeneous jobs list each component, starting with:
+    //   JobId=68 HetJobId=67 HetJobOffset=1 JobName=...
+    auto line = std::string{};
+    while (std::getline(scontrolJobDetail, line)) {
+        line = cti::split::removeLeadingWhitespace(std::move(line));
+        if ((line.rfind("JobId=", 0) == 0) && (line.find(" HetJobId=") != std::string::npos)) {
+            result.hetJob = true;
+            continue;
+        }
+        if (line.rfind("Nodes=", 0) != 0) {
+            continue;
+        }
+        auto nodes = line.substr(6, line.find(' ') - 6);
+
+        // GRES value contains no spaces, but may contain commas inside index lists
+        auto const gresStart = line.find(" GRES=");
+        auto const gresValue = (gresStart == std::string::npos)
+            ? std::string{}
+            : line.substr(gresStart + 6, line.find(' ', gresStart + 6) - (gresStart + 6));
+
+        // Sum GPU counts of each GRES entry, e.g. gpu:4(IDX:0-3) or gpu:a100:2(IDX:0,2)
+        auto nodeGpus = 0;
+        auto entryStart = size_t{0};
+        auto depth = 0;
+        for (size_t i = 0; i <= gresValue.size(); i++) {
+            if ((i < gresValue.size()) && (gresValue[i] == '(')) {
+                depth++;
+            } else if ((i < gresValue.size()) && (gresValue[i] == ')')) {
+                depth--;
+            } else if ((i == gresValue.size()) || ((gresValue[i] == ',') && (depth == 0))) {
+                auto const entry = gresValue.substr(entryStart, i - entryStart);
+                auto const spec = entry.substr(0, entry.find('('));
+                auto const countStart = spec.rfind(':');
+                if ((spec.rfind("gpu:", 0) == 0) && (countStart != std::string::npos)) {
+                    try {
+                        nodeGpus += std::stoi(spec.substr(countStart + 1));
+                    } catch (std::exception const&) {
+                        // Count missing or not numeric; skip entry
+                    }
+                }
+                entryStart = i + 1;
+            }
+        }
+
+        result.nodeGpus.push_back(NodeGpus{std::move(nodes), nodeGpus});
+    }
+
+    return result;
+}
+
+std::string SLURMFrontend::detail::get_allocation_gres(std::vector<NodeGpus> const& nodeGpus)
+{
+    auto minGpus = std::numeric_limits<int>::max();
+    auto maxGpus = 0;
+    for (auto&& [nodes, gpus] : nodeGpus) {
+        minGpus = std::min(minGpus, gpus);
+        maxGpus = std::max(maxGpus, gpus);
+    }
+
+    // Job has no GPUs
+    if (maxGpus == 0) {
+        return {};
+    }
+
+    return (minGpus > 0) ? "gpu:" + std::to_string(minGpus) : "none";
+}
+
+std::vector<SLURMFrontend::detail::NodeGpus>
+SLURMFrontend::detail::get_limited_nodes(std::vector<NodeGpus> const& nodeGpus,
+    std::string const& gresSetting)
+{
+    // GPUs per node that tool daemons request
+    auto perNode = 0;
+    if (gresSetting.rfind("gpu:", 0) == 0) {
+        try {
+            perNode = std::stoi(gresSetting.substr(gresSetting.rfind(':') + 1));
+        } catch (std::exception const&) {
+            return {};
+        }
+    } else if (gresSetting != "none") {
+        return {};
+    }
+
+    auto result = std::vector<NodeGpus>{};
+    std::copy_if(nodeGpus.begin(), nodeGpus.end(), std::back_inserter(result),
+        [perNode](NodeGpus const& group) { return group.gpus > perNode; });
+    return result;
+}
+
+SLURMFrontend::detail::GpuNodeGroups
+SLURMFrontend::detail::get_gpu_node_groups(std::vector<std::string> const& stepNodes,
+    std::map<std::string, int> const& nodeGpuCounts)
+{
+    // Step layout node names (from sattach --layout) and the expanded allocation node
+    // lists are both Slurm node names
+    auto result = GpuNodeGroups{};
+    for (auto&& node : stepNodes) {
+        auto const count = nodeGpuCounts.find(node);
+        if (count == nodeGpuCounts.end()) {
+            return {};
+        }
+        result[count->second].push_back(node);
+    }
+
+    return result;
 }
 
 SLURMFrontend::SLURMFrontend()
@@ -1895,49 +2323,11 @@ SLURMFrontend::SLURMFrontend()
             });
         }
 
-        // CPE-12956 / SchedMD 23832 fixed a bug where GPUs specified via
-        // -G (SLURM_GPUS) can cause GRES calculations to fail. If version is detected
-        // to be lower than 25.11.1 or 26.05, emit a warning and try to work around by
-        // setting --gpus-per-node
+        // User-specified per-node GPU count for tool daemon launches
         if (auto slurm_gpus_per_node = ::getenv(SLURM_DAEMON_GPUS_PER_NODE)) {
             m_srunDaemonArgs.insert(m_srunDaemonArgs.end(),
                 { "--gpus-per-node=" + std::string{slurm_gpus_per_node}
             });
-
-        // Check if workaround needed
-        } else if (auto slurm_gpus = ::getenv("SLURM_GPUS")) {
-            if (((major <= 25) && version_less_than(25, 11, 1))
-            || ((major == 26) && version_less_than(26,  5, 0))) {
-
-                fprintf(stderr, "Slurm versions before 25.11.1 / 26.05.0 "
-                    "are affected by Slurm bug 23832 where GPUs specified via "
-                    "-G (SLURM_GPUS) can cause GRES calculations to fail.\n");
-
-                // Calculate GPUs per node
-                if (auto slurm_nnodes = ::getenv("SLURM_NNODES")) {
-                    auto num_nodes = cti::stoi(slurm_nnodes, "SLURM_NNODES");
-                    if (num_nodes <= 0) {
-                        throw std::runtime_error("SLURM_NNODES was set to "
-                            + std::to_string(num_nodes) + ". Set "
-                            SLURM_DAEMON_GPUS_PER_NODE " to manually set "
-                            "--gpus-per-node for tool launches");
-                    }
-
-                    // GPUS per node = total GPUs / number of nodes, round up
-                    auto num_gpus = cti::stoi(slurm_gpus, "SLURM_GPUS");
-                    auto gpus_per_node = (num_gpus + (num_nodes - 1)) / num_nodes;
-
-                    fprintf(stderr, "Calculated %d GPUs across %d %s, setting "
-                        "--gpus-per-node=%d for tool launches.\nTo override this, "
-                        "set " SLURM_DAEMON_GPUS_PER_NODE "\n",
-                        num_gpus, num_nodes,
-                        (num_nodes == 1) ? "node" : "nodes", gpus_per_node);
-
-                    m_srunDaemonArgs.insert(m_srunDaemonArgs.end(),
-                        { "--gpus-per-node=" + std::to_string(gpus_per_node)
-                    });
-                }
-            }
         }
 
         // Up to (and possibly beyond) Slurm 22.05.8, scancel might report that
@@ -1993,8 +2383,8 @@ SLURMFrontend::launch(CArgArray launcher_args, int stdout_fd, int stderr_fd,
     auto appPtr = std::make_shared<SLURMApp>(*this,
         launchApp(launcher_args, inputFile, stdout_fd, stderr_fd, chdirPath, env_list));
 
-    // Set tool daemon GRES based on launcher argument
-    appPtr->setGres(detail::get_gres_setting(launcher_args));
+    // Set tool daemon GRES based on launcher argument and job allocation
+    appPtr->setGres(detail::get_gres_setting(launcher_args, appPtr->getGres()));
 
     // Release barrier and continue launch
     appPtr->releaseBarrier();
@@ -2015,8 +2405,8 @@ SLURMFrontend::launchBarrier(CArgArray launcher_args, int stdout_fd, int stderr_
     auto appPtr = std::make_shared<SLURMApp>(*this,
         launchApp(launcher_args, inputFile, stdout_fd, stderr_fd, chdirPath, env_list));
 
-    // Set tool daemon GRES based on launcher argument
-    appPtr->setGres(detail::get_gres_setting(launcher_args));
+    // Set tool daemon GRES based on launcher argument and job allocation
+    appPtr->setGres(detail::get_gres_setting(launcher_args, appPtr->getGres()));
 
     // Register with frontend application set
     auto resultInsertedPair = m_apps.emplace(std::move(appPtr));
@@ -2685,8 +3075,8 @@ EproxySLURMFrontend::launch(CArgArray launcher_args, int stdout_fd, int stderr_f
         auto appPtr = std::make_shared<EproxySLURMApp>(*this, std::move(remoteDaemon), std::move(mpirData),
             jobId, stepId);
 
-        // Set tool daemon GRES based on launcher argument
-        appPtr->setGres(detail::get_gres_setting(launcher_args));
+        // Set tool daemon GRES based on launcher argument and job allocation
+        appPtr->setGres(detail::get_gres_setting(launcher_args, appPtr->getGres()));
 
         // Release barrier and continue launch
         appPtr->releaseBarrier();
@@ -2716,8 +3106,8 @@ EproxySLURMFrontend::launchBarrier(CArgArray launcher_args, int stdout_fd, int s
         auto appPtr = std::make_shared<EproxySLURMApp>(*this, std::move(remoteDaemon), std::move(mpirData),
             jobId, stepId);
 
-        // Set tool daemon GRES based on launcher argument
-        appPtr->setGres(detail::get_gres_setting(launcher_args));
+        // Set tool daemon GRES based on launcher argument and job allocation
+        appPtr->setGres(detail::get_gres_setting(launcher_args, appPtr->getGres()));
 
         // Register with frontend application set
         auto resultInsertedPair = m_apps.emplace(std::move(appPtr));

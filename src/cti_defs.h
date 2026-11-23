@@ -122,8 +122,11 @@ typedef struct
 #define SLURM_DISABLE_SACCT "CTI_SLURM_DISABLE_SACCT"
 // Cassini maximum job limit
 #define SLURM_CASSINI_JOB_LIMIT 3
-// CPE-12956 / SchedMD 23832 auto GPU calculation override
+// Set to pass --gpus-per-node=<value> to tool daemon launches instead of the per-node GPU GRES CTI reads from the job
 #define SLURM_DAEMON_GPUS_PER_NODE "CTI_SLURM_DAEMON_GPUS_PER_NODE"
+// Set to 1 to give tool daemons each node's GPUs with one heterogeneous step component per
+// GPU count when the job's nodes have different GPU counts
+#define SLURM_DAEMON_GRES_SPLIT "CTI_SLURM_DAEMON_GRES_SPLIT"
 
 /*******************************************************************************
 ** SSH specific information
